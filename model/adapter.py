@@ -66,10 +66,8 @@ class Adapter(nn.Module):
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
-        head_mask = [None] * self.adapter_config.num_hidden_layers
-        encoder_outputs = self.encoder(down_projected,
-                                       attention_mask=extended_attention_mask,
-                                       head_mask=head_mask)
+        # head_mask = [None] * self.adapter_config.num_hidden_layers
+        encoder_outputs = self.encoder(down_projected, attention_mask=extended_attention_mask)
 
         up_projected = self.up_project(encoder_outputs[0])
         return hidden_states + up_projected
@@ -87,11 +85,14 @@ class AdapterModel(nn.Module):
         super(AdapterModel, self).__init__()
 
         self.config = pretrained_model_config
+        self.adapter_config = AdapterConfig(pretrained_model_config)
+
         self.adapter_size = 768 # 768
         self.adapter_skip_layers = 2 # 2
-        self.adapter_list = [0, 11, 23] # based Large
+        # self.adapter_list = [0, 11, 23] # based Large
+        self.adapter_list = [0, 5, 11]
         self.adapter_num = len(self.adapter_list)
-        self.adapter = nn.ModuleList([Adapter(args, AdapterConfig) for _ in range(self.adapter_num)])
+        self.adapter = nn.ModuleList([Adapter(self.adapter_config) for _ in range(self.adapter_num)])
 
         self.com_dense = nn.Linear(self.config.hidden_size * 2, self.config.hidden_size)
         self.dense = nn.Linear(self.config.hidden_size * 2, self.config.hidden_size)
@@ -99,14 +100,15 @@ class AdapterModel(nn.Module):
         self.out_proj = nn.Linear(self.config.hidden_size, self.num_labels)
 
     def forward(self, pretrained_model_outputs, input_ids, attention_mask=None, token_type_ids=None, position_ids=None,
-                head_mask=None,
-                labels=None, subj_special_start_id=None, obj_special_start_id=None):
+                head_mask=None, labels=None, subj_special_start_id=None, obj_special_start_id=None):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         outputs = pretrained_model_outputs
+
         sequence_output = outputs[0]
         # pooler_output = outputs[1]
         hidden_states = outputs[2]
         hidden_state_num = len(hidden_states)
-        hidden_states_last = torch.zeros(sequence_output.size()).to(self.args.device)
+        hidden_states_last = torch.zeros(sequence_output.size()).to(device)
 
         adapter_hidden_states = []
         adapter_hidden_states_count = 0
@@ -142,7 +144,7 @@ class AdapterModel(nn.Module):
             outputs = (loss,) + outputs
         return outputs  # (loss), logits, (hidden_states), (attentions)
 
-    def save_pretrained(self, save_directory, logger):
+    def save_pretrained(self, save_directory):
         assert os.path.isdir(save_directory), "Saving path should be a directory where the model and configuration can be saved"
         # Only save the model it-self if we are using distributed training
         model_to_save = self.module if hasattr(self, 'module') else self
@@ -151,4 +153,4 @@ class AdapterModel(nn.Module):
         # If we save using the predefined names, we can load using `from_pretrained`
         output_model_file = os.path.join(save_directory, "pytorch_model.bin")
         torch.save(model_to_save.state_dict(), output_model_file)
-        logger.info("Saving model checkpoint to %s", save_directory)
+        print("Saving model checkpoint to %s", save_directory)

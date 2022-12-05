@@ -9,8 +9,7 @@ from attrdict import AttrDict
 from tqdm import tqdm
 from torch.utils.data import RandomSampler, SequentialSampler, DataLoader
 from transformers import get_linear_schedule_with_warmup
-from model.span_ner import ElectraSpanNER
-from model.adapter import AdapterModel
+from model.span_ner import SpanNER
 
 from tag_def import ETRI_TAG
 from datasets import SpanNERDataset
@@ -23,7 +22,7 @@ from utils import (
 logger = init_logger()
 
 #===============================================================
-def evaluate(args, model, adapter, eval_dataset, mode, global_step=None, train_epoch=0):
+def evaluate(args, model, eval_dataset, mode, global_step=None, train_epoch=0):
 #===============================================================
     results = {}
 
@@ -46,7 +45,7 @@ def evaluate(args, model, adapter, eval_dataset, mode, global_step=None, train_e
     eval_pbar = tqdm(eval_dataloader)
     for batch in eval_pbar:
         model.eval()
-        adapter.eval()
+
         with torch.no_grad():
             label_ids = batch["label_ids"]
             inputs = {
@@ -64,9 +63,6 @@ def evaluate(args, model, adapter, eval_dataset, mode, global_step=None, train_e
             }
 
             loss, predict = model(**inputs)
-            adapter_outputs = adapter(model_outputs, **inputs)
-
-
             eval_loss += loss.mean().item()
 
         nb_eval_steps += 1
@@ -119,7 +115,7 @@ def evaluate(args, model, adapter, eval_dataset, mode, global_step=None, train_e
     return results
 
 #=======================================================
-def train(args, model, adapter, train_dataset, dev_dataset):
+def train(args, model, train_dataset, dev_dataset):
 #=======================================================
     train_data_len = len(train_dataset)
 
@@ -157,14 +153,12 @@ def train(args, model, adapter, train_dataset, dev_dataset):
 
     train_sampler = RandomSampler(train_dataset)
     model.zero_grad()
-    adapter.zero_grad()
     for epoch in range(args.num_train_epochs):
         train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
         pbar = tqdm(train_dataloader)
 
         for step, batch in enumerate(pbar):
-            model.eval()  # EVAL!
-            adapter.train()
+            model.train()
 
             inputs = {
                 "input_ids": batch["input_ids"].to(args.device),
@@ -181,12 +175,9 @@ def train(args, model, adapter, train_dataset, dev_dataset):
             }
 
             loss = model(**inputs)
-            adapter_outputs = adapter(model_outputs, **inputs)
-            adapter_loss = adapter_outputs[0]
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
-                adapter_loss = adapter_loss / args.gradient_accumulation_steps
 
             loss.backward()
             tr_loss += loss.item()
@@ -196,20 +187,18 @@ def train(args, model, adapter, train_dataset, dev_dataset):
                      (step + 1) == len(train_dataloader)
                     ):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                torch.nn.utils.clip_grad_norm_(adapter.parameters(), args.max_grad_norm)
 
                 optimizer.step()
                 scheduler.step()
 
                 model.zero_grad()
-                adapter.zero_grad()
 
                 global_step += 1
 
                 pbar.set_description("Train Loss - %.04f" % (tr_loss / global_step))
 
                 if args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    evaluate(args, model, adapter, dev_dataset, "dev", global_step)
+                    evaluate(args, model, dev_dataset, "dev", global_step)
 
                 if args.save_steps > 0 and global_step % args.save_steps == 0:
                     # Save samples checkpoint
@@ -258,12 +247,8 @@ def main():
         args = AttrDict(json.load(config_file))
     args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    config, model = load_ner_config_and_model(args, ETRI_TAG)
+    config, model = load_ner_config_and_model(args, span_tag_dict)
     model.to(args.device)
-
-    # K-Adapter
-    adapter_model = AdapterModel(config)
-    adapter_model.to(args.device)
 
     logger.info(f"[run_ner][__main__] model: {args.model_name_or_path}")
     logger.info(f"Training/Evaluation parameters")
@@ -285,6 +270,7 @@ def main():
         load_corpus_span_ner_npy(args.test_npy, mode="test")
 
     # Make Datasets
+    # Span NER
     train_dataset = SpanNERDataset(data=train_npy, label_ids=train_label_ids, pos_ids=train_pos_ids,
                                    span_only_label=train_span_only_label, real_span_mask=train_real_span_mask,
                                    all_span_len=train_all_span_len, all_span_idx=train_all_span_idx)
@@ -315,7 +301,7 @@ def main():
 
         for checkpoint in checkpoints:
             global_step = checkpoint.split("-")[-1]
-            model = ElectraSpanNER.from_pretrained(checkpoint)
+            model = SpanNER.from_pretrained(checkpoint)
             model.to(args.device)
             result = evaluate(args, model, test_dataset, mode="test", global_step=global_step)
             result = dict((k + "_{}".format(global_step), v) for k, v in result.items())

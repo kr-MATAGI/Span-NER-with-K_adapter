@@ -4,16 +4,20 @@ import torch.nn as nn
 from transformers import ElectraModel, ElectraPreTrainedModel
 
 from model.classifier import SingleLinearClassifier, MultiNonLinearClassifier
+from model.adapter import AdapterModel
 from allennlp.modules.span_extractors import EndpointSpanExtractor
 from torch.nn import functional as F
 from tag_def import MECAB_POS_TAG
 
 
 #=======================================================
-class ElectraSpanNER(ElectraPreTrainedModel):
+class SpanNER(ElectraPreTrainedModel):
 #=======================================================
-    def __init__(self, config):
-        super(ElectraSpanNER, self).__init__(config)
+    def __init__(self, config, is_pre_train: bool = False):
+        super(SpanNER, self).__init__(config)
+
+        # For Adapter
+        self.is_pre_train = is_pre_train
 
         # Init
         self.hidden_size = config.hidden_size
@@ -30,7 +34,7 @@ class ElectraSpanNER(ElectraPreTrainedModel):
         self.span_len_emb_dim = 100
         ''' morp는 origin에서 {'isupper': 1, 'islower': 2, 'istitle': 3, 'isdigit': 4, 'other': 5}'''
         self.pos_emb_dim = 100
-        self.n_pos = 15  # 일반명사/고유명사 통합, NNBC, 기호 추가
+        self.n_pos = 14  # 일반명사/고유명사 통합
 
         ''' 원본 Git에서는 Method 적용 개수에 따라 달라짐 '''
         self.input_dim = self.hidden_size * 2 + self.token_len_emb_dim + self.span_len_emb_dim + (
@@ -46,25 +50,19 @@ class ElectraSpanNER(ElectraPreTrainedModel):
         print("self.pos_emb_dim.dim: ", self.pos_emb_dim)
         print("self.input_dim: ", self.input_dim)
 
-        # Model
+        # PLM
         self.electra = ElectraModel.from_pretrained("monologg/koelectra-base-v3-discriminator", config=config)
 
-        ''' 이거 2개 사용안함
-        self.start_outputs = nn.Linear(self.hidden_size, 1)
-        self.end_outputs = nn.Linear(self.hidden_size, 1)
-        '''
+        # K-Adapter
+        self.k_adapter = AdapterModel(config)
+        self.adapter_classifier = nn.Linear(config.hidden_size, config.hidden_size)
 
-        # LSTM
         self.endpoint_span_extractor = EndpointSpanExtractor(input_dim=self.hidden_size,
                                                              combination=self.span_combi_mode,
                                                              num_width_embeddings=self.max_span_width,
                                                              span_width_embedding_dim=self.token_len_emb_dim,
                                                              bucket_widths=True)
 
-        ''' 이거 2개 사용안함 
-        self.linear = nn.Linear(10, 1)
-        self.score_func = nn.Softmax(dim=-1)
-        '''
         self.span_embedding = MultiNonLinearClassifier(self.input_dim,
                                                        self.n_class,
                                                        self.model_dropout)
@@ -72,13 +70,32 @@ class ElectraSpanNER(ElectraPreTrainedModel):
         self.span_len_embedding = nn.Embedding(self.max_span_width + 1, self.span_len_emb_dim, padding_idx=0)
         self.pos_embedding = nn.Embedding(self.n_pos, self.pos_emb_dim)
 
-    # ==============================================
+        ''' Adapter Pre-train을 위해 Freeze '''
+        if self.is_pre_train:
+            self._freeze_adapter_pretrain()
+
+    #==============================================
+    def _freeze_adapter_pretrain(self):
+    #==============================================
+        for name, param in self.electra.named_parameters():
+            param.requires_grad = False
+        for param in self.endpoint_span_extractor.parameters():
+            param.requires_grad = False
+        for param in self.span_embedding.parameters():
+            param.requires_grad = False
+        for param in self.span_len_embedding.parameters():
+            param.requires_grad = False
+        for param in self.pos_embedding.parameters():
+            param.requires_grad = False
+
+
+    #==============================================
     def forward(self,
                 all_span_lens, all_span_idxs_ltoken, real_span_mask_ltoken, input_ids, pos_ids,
                 token_type_ids=None, attention_mask=None, span_only_label=None, mode: str = "train",
                 label_ids=None
                 ):
-    # ==============================================
+    #==============================================
         """
         Args:
             loadall: [tokens, token_type_ids, all_span_idxs_ltoken,
@@ -98,6 +115,12 @@ class ElectraSpanNER(ElectraPreTrainedModel):
                                        token_type_ids=token_type_ids)
 
         electra_outputs = electra_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+
+        adapter_outputs = self.k_adapter(electra_outputs)
+        if self.is_pre_train:
+            adapter_pre_outputs = self.adapter_classifier(adapter_outputs)
+
+            return
 
         # [batch, n_span, input_dim] : [64, 502, 1586]
         '''

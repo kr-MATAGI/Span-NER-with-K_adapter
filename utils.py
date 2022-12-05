@@ -10,7 +10,7 @@ from sklearn import metrics as sklearn_metrics
 
 # config, model
 from transformers import ElectraConfig, AutoConfig, AutoModelForTokenClassification, ElectraForTokenClassification
-from model.span_ner import ElectraSpanNER
+from model.span_ner import SpanNER
 
 #===============================================================
 def print_parameters(args, logger):
@@ -142,6 +142,6 @@ def load_ner_config_and_model(args, tag_dict):
     config.etri_tags = {label: i for i, label in enumerate(tag_dict.keys())}
 
     # Model
-    model = ElectraSpanNER.from_pretrained(args.model_name_or_path, config=config)
+    model = SpanNER.from_pretrained(args.model_name_or_path, config=config)
 
     return config, model
