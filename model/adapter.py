@@ -3,20 +3,23 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
 
-from transformer_enc import TransformerEncoder, TransformerConfig
+from model.transformer_enc import TransformerEncoder, TransformerConfig
 
 #========================================================
 class AdapterConfig(object):
 #========================================================
     def __init__(self,
-                 pretrained_model_config,
-                 adapter_transformer_layers: int = 2,
-                 adapter_size: int = 768,
-                 vocab_size: int = 50265):
+                 args,
+                 pretrained_model_config):
+
+        # from args
+        self.adapter_size = args.adapter_size
+        self.num_hidden_layers = args.adapter_transformer_layers
+        self.adapter_skip_layers = args.adapter_skip_layers
+        self.adapter_num = 3 # [0, 5, 11]
 
         self.project_hidden_size: int = pretrained_model_config.hidden_size
         self.hidden_act: str = "gelu"
-        self.adapter_size: int = adapter_size  # 64
         self.adapter_initializer_range: float = 0.0002
         self.is_decoder: bool = False
         self.attention_probs_dropout_prob: float = 0.1
@@ -27,13 +30,12 @@ class AdapterConfig(object):
         self.layer_norm_eps: float = 1e-05
         self.max_position_embeddings: int = 514
         self.num_attention_heads: int = 12
-        self.num_hidden_layers: int = adapter_transformer_layers
         self.num_labels: int = 2
         self.output_attentions: bool = False
         self.output_hidden_states: bool = False
         self.torchscript: bool = False
         self.type_vocab_size: int = 1
-        self.vocab_size: int = vocab_size
+        self.vocab_size: int = pretrained_model_config.vocab_size
 
 #========================================================
 class Adapter(nn.Module):
@@ -41,13 +43,21 @@ class Adapter(nn.Module):
     def __init__(self, adapter_config):
         super(Adapter, self).__init__()
         self.adapter_config = adapter_config
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         self.down_project = nn.Linear(
             self.adapter_config.project_hidden_size,
             self.adapter_config.adapter_size
         )
 
-        self.encoder = TransformerEncoder(self.adapter_config)
+        '''
+            vocab_size: 35004,
+            project_hidden_size: 768,
+            adapter_size: 128
+        '''
+        self.encoder_config = TransformerConfig(adapter_config.vocab_size, hidden_size=self.adapter_config.adapter_size)
+        self.encoder_config.num_heads = 8
+        self.encoder = TransformerEncoder(self.encoder_config)
         self.up_project = nn.Linear(self.adapter_config.adapter_size, adapter_config.project_hidden_size)
 
         self.init_weights()
@@ -56,7 +66,7 @@ class Adapter(nn.Module):
         down_projected = self.down_project(hidden_states)
 
         input_shape = down_projected.size()[:-1]
-        attention_mask = torch.ones(input_shape, device=self.args.device)
+        attention_mask = torch.ones(input_shape, device=self.device)
         # encoder_attention_mask = torch.ones(input_shape, device=self.args.device)
         if attention_mask.dim() == 3:
             extended_attention_mask = attention_mask[:, None, :, :]
@@ -81,17 +91,17 @@ class Adapter(nn.Module):
 #========================================================
 class AdapterModel(nn.Module):
 #========================================================
-    def __init__(self, pretrained_model_config):
+    def __init__(self, args, pretrained_model_config, num_labels):
         super(AdapterModel, self).__init__()
 
         self.config = pretrained_model_config
-        self.adapter_config = AdapterConfig(pretrained_model_config)
+        self.adapter_config = AdapterConfig(args, pretrained_model_config)
 
-        self.adapter_size = 768 # 768
-        self.adapter_skip_layers = 2 # 2
-        # self.adapter_list = [0, 11, 23] # based Large
-        self.adapter_list = [0, 5, 11]
+        self.adapter_skip_layers = args.adapter_skip_layers
+        self.num_labels = num_labels
+        self.adapter_list = [0, 5, 11] # Base Model
         self.adapter_num = len(self.adapter_list)
+
         self.adapter = nn.ModuleList([Adapter(self.adapter_config) for _ in range(self.adapter_num)])
 
         self.com_dense = nn.Linear(self.config.hidden_size * 2, self.config.hidden_size)
@@ -100,13 +110,13 @@ class AdapterModel(nn.Module):
         self.out_proj = nn.Linear(self.config.hidden_size, self.num_labels)
 
     def forward(self, pretrained_model_outputs, input_ids, attention_mask=None, token_type_ids=None, position_ids=None,
-                head_mask=None, labels=None, subj_special_start_id=None, obj_special_start_id=None):
+                head_mask=None, label_ids=None, subj_special_start_id=None, obj_special_start_id=None):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         outputs = pretrained_model_outputs
 
-        sequence_output = outputs[0]
+        sequence_output = outputs.last_hidden_state
         # pooler_output = outputs[1]
-        hidden_states = outputs[2]
+        hidden_states = outputs.hidden_states
         hidden_state_num = len(hidden_states)
         hidden_states_last = torch.zeros(sequence_output.size()).to(device)
 
@@ -125,22 +135,25 @@ class AdapterModel(nn.Module):
         ##### drop below parameters when doing downstream tasks
         com_features = self.com_dense(torch.cat([sequence_output, hidden_states_last], dim=2))
 
-        subj_special_start_id = subj_special_start_id.unsqueeze(1)
-        subj_output = torch.bmm(subj_special_start_id, com_features)
-        obj_special_start_id = obj_special_start_id.unsqueeze(1)
-        obj_output = torch.bmm(obj_special_start_id, com_features)
+        # subj_special_start_id = subj_special_start_id.unsqueeze(1)
+        # subj_output = torch.bmm(subj_special_start_id, com_features)
+        # obj_special_start_id = obj_special_start_id.unsqueeze(1)
+        # obj_output = torch.bmm(obj_special_start_id, com_features)
+        # logits = self.out_proj(
+        #     self.dropout(self.dense(torch.cat((subj_output.squeeze(1), obj_output.squeeze(1)), dim=1))))
         logits = self.out_proj(
-            self.dropout(self.dense(torch.cat((subj_output.squeeze(1), obj_output.squeeze(1)), dim=1))))
+            self.dropout(com_features)
+        )
 
         outputs = (logits,) + outputs[2:]
-        if labels is not None:
+        if label_ids is not None:
             if self.num_labels == 1:
                 #  We are doing regression
                 loss_fct = MSELoss()
-                loss = loss_fct(logits.view(-1), labels.view(-1))
+                loss = loss_fct(logits.view(-1), label_ids.view(-1))
             else:
                 loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                loss = loss_fct(logits.view(-1, self.num_labels), label_ids.view(-1))
             outputs = (loss,) + outputs
         return outputs  # (loss), logits, (hidden_states), (attentions)
 

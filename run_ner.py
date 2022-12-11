@@ -8,14 +8,16 @@ import re
 from attrdict import AttrDict
 from tqdm import tqdm
 from torch.utils.data import RandomSampler, SequentialSampler, DataLoader
-from transformers import get_linear_schedule_with_warmup
-from model.span_ner import SpanNER
+from transformers import get_linear_schedule_with_warmup, ElectraConfig, ElectraTokenizer
+
+from model.adapter import AdapterModel
+from model.pretrained_model import PretrainedModel
 
 from tag_def import ETRI_TAG
-from datasets import SpanNERDataset
+from datasets import SpanNERDataset, AdapterDatasets
 from utils import (
-    print_parameters, load_corpus_span_ner_npy, load_ner_config_and_model,
-    init_logger, set_seed, f1_pre_rec, show_ner_report
+    print_parameters, load_corpus_span_ner_npy, load_adapter_npy_datasets, load_ner_config_and_model,
+    init_logger, set_seed, f1_pre_rec, show_ner_report, load_adapter_config
 )
 
 # Global Variable
@@ -119,6 +121,9 @@ def train(args, model, train_dataset, dev_dataset):
 #=======================================================
     train_data_len = len(train_dataset)
 
+    pretrained_model = model[0]
+    adapter_model = model[1]
+
     if args.max_steps > 0:
         t_total = args.max_steps
         args.num_train_epochs = args.max_steps // (train_data_len // args.gradient_accumulation_steps) + 1
@@ -128,9 +133,9 @@ def train(args, model, train_dataset, dev_dataset):
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+        {'params': [p for n, p in adapter_model.named_parameters() if not any(nd in n for nd in no_decay)],
          'weight_decay': args.weight_decay},
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        {'params': [p for n, p in adapter_model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
 
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
@@ -152,29 +157,26 @@ def train(args, model, train_dataset, dev_dataset):
     tr_loss = 0.0
 
     train_sampler = RandomSampler(train_dataset)
-    model.zero_grad()
+    pretrained_model.zero_grad()
+    adapter_model.zero_grad()
     for epoch in range(args.num_train_epochs):
         train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
         pbar = tqdm(train_dataloader)
 
         for step, batch in enumerate(pbar):
-            model.train()
+            pretrained_model.eval()
+            adapter_model.train()
 
             inputs = {
                 "input_ids": batch["input_ids"].to(args.device),
                 "attention_mask": batch["attention_mask"].to(args.device),
                 "token_type_ids": batch["token_type_ids"].to(args.device),
                 "label_ids": batch["label_ids"].to(args.device),
-                "pos_ids": batch["pos_ids"].to(args.device),
-
-                "all_span_idxs_ltoken": batch["all_span_idx"].to(args.device),
-                "all_span_lens": batch["all_span_len"].to(args.device),
-                "real_span_mask_ltoken": batch["real_span_mask"].to(args.device),
-                "span_only_label": batch["span_only_label"].to(args.device),
-                "mode": "train"
             }
 
-            loss = model(**inputs)
+            pretrained_model_outputs = pretrained_model(**inputs)
+            outputs = adapter_model(pretrained_model_outputs, **inputs)
+            loss = outputs[0]
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -191,8 +193,6 @@ def train(args, model, train_dataset, dev_dataset):
                 optimizer.step()
                 scheduler.step()
 
-                model.zero_grad()
-
                 global_step += 1
 
                 pbar.set_description("Train Loss - %.04f" % (tr_loss / global_step))
@@ -206,7 +206,7 @@ def train(args, model, train_dataset, dev_dataset):
                     if not os.path.exists(output_dir):
                         os.makedirs(output_dir)
                     model_to_save = (
-                        model.module if hasattr(model, "module") else model
+                        adapter_model.module if hasattr(adapter_model, "module") else adapter_model
                     )
                     model_to_save.save_pretrained(output_dir)
 
@@ -247,8 +247,18 @@ def main():
         args = AttrDict(json.load(config_file))
     args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    config, model = load_ner_config_and_model(args, span_tag_dict)
-    model.to(args.device)
+    plm_tokenizer = ElectraTokenizer.from_pretrained("./utils/tokenizer")
+    plm_model = PretrainedModel(plm_tokenizer)
+
+    with open("./corpus/klue_re/relation_list.json", "r", encoding="utf-8") as f:
+        relation_class = json.load(f)["relations"]
+        label_map = {label: i for i, label in enumerate(relation_class)}
+
+    adapter_model = AdapterModel(args, plm_model.config, num_labels=len(label_map.keys()))
+
+    plm_model.to(args.device)
+    adapter_model.to(args.device)
+    model = (plm_model, adapter_model)
 
     logger.info(f"[run_ner][__main__] model: {args.model_name_or_path}")
     logger.info(f"Training/Evaluation parameters")
@@ -259,31 +269,21 @@ def main():
     args.output_dir = os.path.join(args.ckpt_dir, args.output_dir)
 
     # Load npy
-    train_npy, train_label_ids, train_all_span_idx, train_all_span_len, \
-    train_real_span_mask, train_span_only_label, train_pos_ids = \
-        load_corpus_span_ner_npy(args.train_npy, mode="train")
-    dev_npy, dev_label_ids, dev_all_span_idx, dev_all_span_len, \
-    dev_real_span_mask, dev_span_only_label, dev_pos_ids = \
-        load_corpus_span_ner_npy(args.dev_npy, mode="dev")
-    test_npy, test_label_ids, test_all_span_idx, test_all_span_len, \
-    test_real_span_mask, test_span_only_label, test_pos_ids = \
-        load_corpus_span_ner_npy(args.test_npy, mode="test")
+    adapter_dataset_path = "./corpus/npy/klue_re/"
+    train_input_ids, train_attn_mask, train_tok_type_ids, train_label_ids = \
+        load_adapter_npy_datasets(src_path=adapter_dataset_path, mode="train")
+    dev_input_ids, dev_attn_mask, dev_tok_type_ids, dev_label_ids = \
+        load_adapter_npy_datasets(src_path=adapter_dataset_path, mode="dev")
 
     # Make Datasets
-    # Span NER
-    train_dataset = SpanNERDataset(data=train_npy, label_ids=train_label_ids, pos_ids=train_pos_ids,
-                                   span_only_label=train_span_only_label, real_span_mask=train_real_span_mask,
-                                   all_span_len=train_all_span_len, all_span_idx=train_all_span_idx)
-    dev_dataset = SpanNERDataset(data=dev_npy, label_ids=dev_label_ids, pos_ids=dev_pos_ids,
-                                 span_only_label=dev_span_only_label, real_span_mask=dev_real_span_mask,
-                                 all_span_len=dev_all_span_len, all_span_idx=dev_all_span_idx)
-    test_dataset = SpanNERDataset(data=test_npy, label_ids=test_label_ids, pos_ids=test_pos_ids,
-                                  span_only_label=test_span_only_label, real_span_mask=test_real_span_mask,
-                                  all_span_len=test_all_span_len, all_span_idx=test_all_span_idx)
+    train_dataset = AdapterDatasets(input_ids=train_input_ids, label_ids=train_label_ids,
+                                    attn_mask=train_attn_mask, tok_type_ids=train_tok_type_ids)
+    dev_dataset = AdapterDatasets(input_ids=dev_input_ids, label_ids=dev_label_ids,
+                                  attn_mask=dev_attn_mask, tok_type_ids=dev_tok_type_ids)
 
     # Train
     if args.do_train:
-        global_step, tr_loss = train(args, model, adapter_model, train_dataset, dev_dataset)
+        global_step, tr_loss = train(args, model, train_dataset, dev_dataset)
         logger.info(f"global_step = {global_step}, average loss = {tr_loss}")
 
     results = {}

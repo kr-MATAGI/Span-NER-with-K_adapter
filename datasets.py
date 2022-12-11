@@ -45,3 +45,29 @@ class SpanNERDataset(Dataset):
         }
 
         return items
+
+#===============================================================
+class AdapterDatasets(Dataset):
+#===============================================================
+    def __init__(
+            self,
+            input_ids: np.ndarray, label_ids: np.ndarray,
+            attn_mask: np.ndarray, tok_type_ids: np.ndarray
+    ):
+        self.input_ids = torch.LongTensor(input_ids)
+        self.attn_mask = torch.LongTensor(attn_mask)
+        self.tok_type_ids = torch.LongTensor(tok_type_ids)
+        self.label_ids = torch.LongTensor(label_ids)
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, idx):
+        items = {
+            "input_ids": self.input_ids[idx],
+            "attention_mask": self.attn_mask[idx],
+            "token_type_ids": self.tok_type_ids[idx],
+            "label_ids": self.label_ids[idx]
+        }
+
+        return items

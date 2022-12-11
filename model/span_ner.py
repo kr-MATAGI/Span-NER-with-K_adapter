@@ -70,7 +70,7 @@ class SpanNER(ElectraPreTrainedModel):
         self.span_len_embedding = nn.Embedding(self.max_span_width + 1, self.span_len_emb_dim, padding_idx=0)
         self.pos_embedding = nn.Embedding(self.n_pos, self.pos_emb_dim)
 
-        ''' Adapter Pre-train을 위해 Freeze '''
+        ''' K-Adapter Pre-train을 위해 Freeze '''
         if self.is_pre_train:
             self._freeze_adapter_pretrain()
 
@@ -93,7 +93,8 @@ class SpanNER(ElectraPreTrainedModel):
     def forward(self,
                 all_span_lens, all_span_idxs_ltoken, real_span_mask_ltoken, input_ids, pos_ids,
                 token_type_ids=None, attention_mask=None, span_only_label=None, mode: str = "train",
-                label_ids=None
+                label_ids=None,
+                adap_input_ids=None, adap_label_ids=None
                 ):
     #==============================================
         """
@@ -116,18 +117,21 @@ class SpanNER(ElectraPreTrainedModel):
 
         electra_outputs = electra_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
 
-        adapter_outputs = self.k_adapter(electra_outputs)
+        adapter_outputs = self.k_adapter(pretrained_model_outputs=electra_outputs,
+                                         input_ids=adap_input_ids, label_ids=adap_label_ids)
         if self.is_pre_train:
             adapter_pre_outputs = self.adapter_classifier(adapter_outputs)
 
-            return
+            return adapter_pre_outputs
 
         # [batch, n_span, input_dim] : [64, 502, 1586]
         '''
             all_span_rep : [batch, n_span, output_dim]
             all_span_idxs_ltoken : [batch, n_span, 2]
         '''
-        all_span_rep = self.endpoint_span_extractor(electra_outputs, all_span_idxs_ltoken.long())
+
+        ''' 원래는 ELECTRA OUTPUTS '''
+        all_span_rep = self.endpoint_span_extractor(adapter_outputs, all_span_idxs_ltoken.long())
 
         ''' use span len, not use morp'''
         # n_span : span 개수

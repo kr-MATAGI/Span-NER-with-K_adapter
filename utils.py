@@ -11,6 +11,7 @@ from sklearn import metrics as sklearn_metrics
 # config, model
 from transformers import ElectraConfig, AutoConfig, AutoModelForTokenClassification, ElectraForTokenClassification
 from model.span_ner import SpanNER
+from model.adapter import AdapterConfig
 
 #===============================================================
 def print_parameters(args, logger):
@@ -74,15 +75,25 @@ def load_corpus_span_ner_npy(src_path: str, mode: str="train"):
     return input_token_attn_npy, label_ids, all_span_idx, all_span_len, real_span_mask, span_only_label, pos_ids
 
 #===============================================================
-def load_corpus_npy_datasets(src_path: str, mode: str="train"):
+def load_adapter_npy_datasets(src_path: str, mode: str="train"):
 #===============================================================
     root_path = "/".join(src_path.split("/")[:-1]) + "/" + mode
 
-    dataset_npy = np.load(src_path)
-    pos_ids_npy = np.load(root_path + "_pos_ids.npy")
+    input_ids_npy = np.load(root_path + "_input_ids.npy")
+    attn_mask_npy = np.load(root_path + "_attention_mask.npy")
+    token_type_ids_npy = np.load(root_path + "_token_type_ids.npy")
     label_ids_npy = np.load(root_path + "_label_ids.npy")
+    print(f"[load_adapter_npy_datasets] mode: {mode}, root_path: {root_path}")
+    print(f"input_ids.shape: {input_ids_npy.shape}, label_ids.shape: {label_ids_npy.shape}")
+    print(f"attn_mask.shape: {attn_mask_npy.shape}, token_type_ids.shape: {token_type_ids_npy.shape}")
 
-    return dataset_npy, label_ids_npy, pos_ids_npy
+    return input_ids_npy, attn_mask_npy, token_type_ids_npy, label_ids_npy
+
+#===============================================================
+def load_adapter_config(args, plm_config):
+#==============================================================
+    config = AdapterConfig(args, plm_config)
+
 
 #===============================================================
 def init_logger():

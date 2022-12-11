@@ -9,7 +9,7 @@ import tag_def
 from definition.klue_re import KlueRE_Item, EntityItem
 
 from tokenizers import BertWordPieceTokenizer
-from transformers import BertTokenizer
+from transformers import BertTokenizer, ElectraTokenizer
 
 #==================================================================
 def parse_re_json(json_path: str = "", save_path: str = ""):
@@ -128,9 +128,11 @@ def mark_entity_spans(
     return marked_text
 
 #==================================================================
-def make_klue_re_npy(src_path: str = "", mode: str = "train"):
+def make_klue_re_npy(src_path: str = "", max_seq_len: int = 128,
+                     mode: str = "train", debug_mode: bool = False):
 #==================================================================
-    tokenizer = BertTokenizer.from_pretrained("./tokenizer")
+    # tokenizer = BertTokenizer.from_pretrained("./tokenizer")
+    tokenizer = ElectraTokenizer.from_pretrained("monologg/koelectra-base-v3-discriminator")
 
     subj_start_marker = "<subj>"
     subj_end_marker = "</subj>"
@@ -144,6 +146,7 @@ def make_klue_re_npy(src_path: str = "", mode: str = "train"):
             obj_end_marker,
         ]
     })
+    tokenizer.save_pretrained("./tokenizer")
 
     data_list: List[KlueRE_Item] = []
     with open(src_path, mode="rb") as data_file:
@@ -153,14 +156,18 @@ def make_klue_re_npy(src_path: str = "", mode: str = "train"):
     # make
     npy_dict = {
         "guid": [],
+        "tokens": [],
         "sent": [],
         "input_ids": [],
-        "label_ids": []
+        "label_ids": [],
+        "attention_mask": [],
+        "token_type_ids": []
     }
 
     with open("../corpus/klue_re/relation_list.json", "r", encoding="utf-8") as f:
         relation_class = json.load(f)["relations"]
         label_map = {label: i for i, label in enumerate(relation_class)}
+        label_ids2tok = {i: label for i, label in enumerate(relation_class)}
 
     for data_item in data_list:
         marked_text = mark_entity_spans(
@@ -168,23 +175,58 @@ def make_klue_re_npy(src_path: str = "", mode: str = "train"):
             subject_range=(data_item.subj_entity.start_idx, data_item.subj_entity.end_idx),
             object_range=(data_item.obj_entity.start_idx, data_item.obj_entity.end_idx)
         )
-        npy_dict["guid"] = data_item.guid
-        npy_dict["sent"] = marked_text
-        npy_dict["input_ids"] = tokenizer.tokenize(marked_text)
-        npy_dict["input_ids"] = tokenizer.convert_tokens_to_ids(npy_dict["input_ids"])
-        npy_dict["label_ids"] = label_map[data_item.label]
+        npy_dict["guid"].append(data_item.guid)
+        npy_dict["sent"].append(marked_text)
+
+        text_tokens = tokenizer.tokenize(marked_text)
+        text_tokens.insert(0, "[CLS]")
+        attention_mask = []
+        token_type_ids = [0] * max_seq_len
+        if max_seq_len <= len(text_tokens):
+            text_tokens = text_tokens[:max_seq_len-1]
+            text_tokens.append("[SEP]")
+
+            attention_mask += [1] * max_seq_len
+        else:
+            text_tokens.append("[SEP]")
+            attention_mask += [1] * len(text_tokens)
+
+            attention_mask += [0] * (max_seq_len - len(text_tokens))
+            text_tokens += ["[PAD]"] * (max_seq_len - len(text_tokens))
+
+        assert max_seq_len == len(text_tokens), f"text_token.len: {len(text_tokens)}, guid: {data_item.guid}"
+        assert max_seq_len == len(attention_mask), f"attn_mask.len: {len(attention_mask)}, guid: {data_item.guid}"
+        assert max_seq_len == len(token_type_ids), f"token_type_ids.len: {len(token_type_ids)}, guid: {data_item.guid}"
+
+        npy_dict["tokens"].append(text_tokens)
+        npy_dict["input_ids"].append(tokenizer.convert_tokens_to_ids(text_tokens))
+        npy_dict["attention_mask"].append(attention_mask)
+        npy_dict["token_type_ids"].append(token_type_ids)
+        npy_dict["label_ids"].append(label_map[data_item.label])
 
     # convert npy
     npy_dict["input_ids"] = np.array(npy_dict["input_ids"])
     npy_dict["label_ids"] = np.array(npy_dict["label_ids"])
 
-    # save
-    np.save(f"../corpus/npy/klue_re/{mode}_guid", npy_dict["guid"])
-    np.save(f"../corpus/npy/klue_re/{mode}_sent", npy_dict["sent"])
-    np.save(f"../corpus/npy/klue_re/{mode}_input_ids", npy_dict["input_ids"])
-    np.save(f"../corpus/npy/klue_re/{mode}_label_ids", npy_dict["label_ids"])
+    if debug_mode:
+        print(f"Debug_mode: {debug_mode}")
 
-    print(f"[make_klue_re_npy] {mode} npy save complete !")
+        for sent, tok, inp, lab in zip(npy_dict["sent"], npy_dict["tokens"], npy_dict["input_ids"], npy_dict["label_ids"]):
+            print("Sent: ", sent)
+            print("Tokens: ", tok)
+            print("Input_ids: ", inp)
+            print("Label_ids: ", label_ids2tok[lab])
+            input()
+    else:
+        # save
+        np.save(f"../corpus/npy/klue_re/{mode}_guid", npy_dict["guid"])
+        np.save(f"../corpus/npy/klue_re/{mode}_sent", npy_dict["sent"])
+        np.save(f"../corpus/npy/klue_re/{mode}_input_ids", npy_dict["input_ids"])
+        np.save(f"../corpus/npy/klue_re/{mode}_attention_mask", npy_dict["attention_mask"])
+        np.save(f"../corpus/npy/klue_re/{mode}_token_type_ids", npy_dict["token_type_ids"])
+        np.save(f"../corpus/npy/klue_re/{mode}_label_ids", npy_dict["label_ids"])
+
+        print(f"[make_klue_re_npy] {mode} npy save complete !")
 
 #==================================================================
 def make_klue_re(corpus_dir_path: str = ""):
@@ -235,5 +277,5 @@ if "__main__" == __name__:
     make_klue_re(corpus_dir_path=corpus_vocab)
 
     # Make *.npy
-    make_klue_re_npy(src_path="../corpus/pkl/klue_re_train.pkl")
-    # make_klue_re_npy(src_path="../corpus/pkl/klue_re_dev.pkl")
+    make_klue_re_npy(src_path="../corpus/pkl/klue_re_train.pkl", mode="train", debug_mode=False)
+    make_klue_re_npy(src_path="../corpus/pkl/klue_re_dev.pkl", mode="dev", debug_mode=False)
