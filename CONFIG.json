@@ -24,13 +24,14 @@
   "model_name_or_path": "monologg/koelectra-base-v3-discriminator",
   "output_dir": "electra-mecab-span-merge-nng-nnp-and-and-new-tokens-add-nnbc-giho-1202",
   "seed": 42,
-  "train_batch_size": 64,
+  "train_batch_size": 32,
   "eval_batch_size": 128,
-  "logging_steps": 1016,
-  "save_steps": 508,
+  "logging_steps": 1013,
+  "save_steps": 1013,
   "learning_rate": 5e-5,
   "n_gpu": 1,
-  "adapter_size": 128,
-  "adapter_skip_layers": 6,
-  "adapter_transformer_layers": 2
+  "adapter_size": 768,
+  "adapter_skip_layers": 0,
+  "adapter_transformer_layers": 2,
+  "no_pos": false
 }

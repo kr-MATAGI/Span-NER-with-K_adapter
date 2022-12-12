@@ -110,7 +110,7 @@ class AdapterModel(nn.Module):
         self.out_proj = nn.Linear(self.config.hidden_size, self.num_labels)
 
     def forward(self, pretrained_model_outputs, input_ids, attention_mask=None, token_type_ids=None, position_ids=None,
-                head_mask=None, label_ids=None, subj_special_start_id=None, obj_special_start_id=None):
+                head_mask=None, label_ids=None, subj_start_id=None, obj_start_id=None):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         outputs = pretrained_model_outputs
 
@@ -133,17 +133,19 @@ class AdapterModel(nn.Module):
                         int(adapter_hidden_states_count / self.adapter_skip_layers)]
 
         ##### drop below parameters when doing downstream tasks
+        # [batch, seq_len, hidden_size] -> [64, 128, 768]
         com_features = self.com_dense(torch.cat([sequence_output, hidden_states_last], dim=2))
-
-        # subj_special_start_id = subj_special_start_id.unsqueeze(1)
-        # subj_output = torch.bmm(subj_special_start_id, com_features)
-        # obj_special_start_id = obj_special_start_id.unsqueeze(1)
-        # obj_output = torch.bmm(obj_special_start_id, com_features)
-        # logits = self.out_proj(
-        #     self.dropout(self.dense(torch.cat((subj_output.squeeze(1), obj_output.squeeze(1)), dim=1))))
-        logits = self.out_proj(
-            self.dropout(com_features)
-        )
+        
+        ''' torch.bmm()은 두 operand가 모두 batch일 때 사용 '''
+        if (None != subj_start_id) and (None != obj_start_id):
+            subj_start_id = subj_start_id.unsqueeze(1)
+            subj_output = torch.bmm(subj_start_id, com_features)
+            obj_start_id = obj_start_id.unsqueeze(1)
+            obj_output = torch.bmm(obj_start_id, com_features)
+            logits = self.out_proj(
+                self.dropout(self.dense(torch.cat((subj_output.squeeze(1), obj_output.squeeze(1)), dim=1))))
+        else:
+            logits = self.out_proj(self.dropout(com_features))
 
         outputs = (logits,) + outputs[2:]
         if label_ids is not None:

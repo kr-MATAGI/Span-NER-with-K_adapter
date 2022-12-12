@@ -128,6 +128,20 @@ def mark_entity_spans(
     return marked_text
 
 #==================================================================
+def get_special_start_id(marked_tokens: List[str] = "",
+                         start_tok: str = "", end_tok: str = "",
+                         max_seq_len: int = 128):
+#==================================================================
+    ret_one_hot = [0] * max_seq_len
+    try:
+        ret_start_id = marked_tokens.index(start_tok) + 1
+        ret_one_hot[ret_start_id] = 1
+    except:
+        raise ValueError(f"Not in {start_tok}")
+
+    return ret_one_hot
+
+#==================================================================
 def make_klue_re_npy(src_path: str = "", max_seq_len: int = 128,
                      mode: str = "train", debug_mode: bool = False):
 #==================================================================
@@ -161,7 +175,9 @@ def make_klue_re_npy(src_path: str = "", max_seq_len: int = 128,
         "input_ids": [],
         "label_ids": [],
         "attention_mask": [],
-        "token_type_ids": []
+        "token_type_ids": [],
+        "subj_start_id": [],
+        "obj_start_id": []
     }
 
     with open("../corpus/klue_re/relation_list.json", "r", encoding="utf-8") as f:
@@ -175,6 +191,7 @@ def make_klue_re_npy(src_path: str = "", max_seq_len: int = 128,
             subject_range=(data_item.subj_entity.start_idx, data_item.subj_entity.end_idx),
             object_range=(data_item.obj_entity.start_idx, data_item.obj_entity.end_idx)
         )
+
         npy_dict["guid"].append(data_item.guid)
         npy_dict["sent"].append(marked_text)
 
@@ -198,11 +215,22 @@ def make_klue_re_npy(src_path: str = "", max_seq_len: int = 128,
         assert max_seq_len == len(attention_mask), f"attn_mask.len: {len(attention_mask)}, guid: {data_item.guid}"
         assert max_seq_len == len(token_type_ids), f"token_type_ids.len: {len(token_type_ids)}, guid: {data_item.guid}"
 
+        if (subj_start_marker not in text_tokens) or (obj_start_marker not in text_tokens):
+            continue
+
         npy_dict["tokens"].append(text_tokens)
         npy_dict["input_ids"].append(tokenizer.convert_tokens_to_ids(text_tokens))
         npy_dict["attention_mask"].append(attention_mask)
         npy_dict["token_type_ids"].append(token_type_ids)
         npy_dict["label_ids"].append(label_map[data_item.label])
+
+        # get subj/obj start id
+        subj_start_id = get_special_start_id(text_tokens, start_tok=subj_start_marker, end_tok=subj_end_marker,
+                                             max_seq_len=max_seq_len)
+        obj_start_id = get_special_start_id(text_tokens, start_tok=obj_start_marker, end_tok=obj_end_marker,
+                                            max_seq_len=max_seq_len)
+        npy_dict["subj_start_id"].append(subj_start_id)
+        npy_dict["obj_start_id"].append(obj_start_id)
 
     # convert npy
     npy_dict["input_ids"] = np.array(npy_dict["input_ids"])
@@ -211,8 +239,11 @@ def make_klue_re_npy(src_path: str = "", max_seq_len: int = 128,
     if debug_mode:
         print(f"Debug_mode: {debug_mode}")
 
-        for sent, tok, inp, lab in zip(npy_dict["sent"], npy_dict["tokens"], npy_dict["input_ids"], npy_dict["label_ids"]):
+        for sent, tok, inp, lab, subj_id, obj_id in zip(npy_dict["sent"], npy_dict["tokens"],
+                                                        npy_dict["input_ids"], npy_dict["label_ids"],
+                                                        npy_dict["subj_start_id"], npy_dict["obj_start_id"]):
             print("Sent: ", sent)
+            print(f"subj_start_id: {subj_id}, obj_start_id: {obj_id}")
             print("Tokens: ", tok)
             print("Input_ids: ", inp)
             print("Label_ids: ", label_ids2tok[lab])
@@ -225,6 +256,8 @@ def make_klue_re_npy(src_path: str = "", max_seq_len: int = 128,
         np.save(f"../corpus/npy/klue_re/{mode}_attention_mask", npy_dict["attention_mask"])
         np.save(f"../corpus/npy/klue_re/{mode}_token_type_ids", npy_dict["token_type_ids"])
         np.save(f"../corpus/npy/klue_re/{mode}_label_ids", npy_dict["label_ids"])
+        np.save(f"../corpus/npy/klue_re/{mode}_subj_start_id", npy_dict["subj_start_id"])
+        np.save(f"../corpus/npy/klue_re/{mode}_obj_start_id", npy_dict["obj_start_id"])
 
         print(f"[make_klue_re_npy] {mode} npy save complete !")
 

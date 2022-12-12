@@ -4,7 +4,7 @@ import torch.nn as nn
 from transformers import ElectraModel, ElectraPreTrainedModel
 
 from model.classifier import SingleLinearClassifier, MultiNonLinearClassifier
-from model.adapter import AdapterModel
+from model.rc_adapter import AdapterModel
 from allennlp.modules.span_extractors import EndpointSpanExtractor
 from torch.nn import functional as F
 from tag_def import MECAB_POS_TAG

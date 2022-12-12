@@ -10,14 +10,17 @@ from tqdm import tqdm
 from torch.utils.data import RandomSampler, SequentialSampler, DataLoader
 from transformers import get_linear_schedule_with_warmup, ElectraConfig, ElectraTokenizer
 
-from model.adapter import AdapterModel
+from model.dp_apdater import AdapterModel
 from model.pretrained_model import PretrainedModel
 
+# from token_utils.metrics import klue_re_auprc
+
 from tag_def import ETRI_TAG
-from datasets import SpanNERDataset, AdapterDatasets
+from sklearn.metrics import f1_score
+from datasets import SpanNERDataset, RcAdapterDatasets
 from utils import (
-    print_parameters, load_corpus_span_ner_npy, load_adapter_npy_datasets, load_ner_config_and_model,
-    init_logger, set_seed, f1_pre_rec, show_ner_report, load_adapter_config
+    print_parameters, load_corpus_span_ner_npy, load_rc_adapter_npy_datasets, load_ner_config_and_model,
+    init_logger, set_seed, f1_pre_rec, show_ner_report, load_adapter_config, klue_re_auprc
 )
 
 # Global Variable
@@ -26,6 +29,9 @@ logger = init_logger()
 #===============================================================
 def evaluate(args, model, eval_dataset, mode, global_step=None, train_epoch=0):
 #===============================================================
+    pretrained_model = model[0]
+    adapter_model = model[1]
+
     results = {}
 
     eval_sampler = SequentialSampler(eval_dataset)
@@ -43,10 +49,13 @@ def evaluate(args, model, eval_dataset, mode, global_step=None, train_epoch=0):
     nb_eval_steps = 0
     preds = None
     out_label_ids = None
+    prediction = []
+    gold_result = []
 
     eval_pbar = tqdm(eval_dataloader)
     for batch in eval_pbar:
-        model.eval()
+        pretrained_model.eval()
+        adapter_model.eval()
 
         with torch.no_grad():
             label_ids = batch["label_ids"]
@@ -55,64 +64,40 @@ def evaluate(args, model, eval_dataset, mode, global_step=None, train_epoch=0):
                 "attention_mask": batch["attention_mask"].to(args.device),
                 "token_type_ids": batch["token_type_ids"].to(args.device),
                 "label_ids": batch["label_ids"].to(args.device),
-                "pos_ids": batch["pos_ids"].to(args.device),
-
-                "all_span_idxs_ltoken": batch["all_span_idx"].to(args.device),
-                "all_span_lens": batch["all_span_len"].to(args.device),
-                "real_span_mask_ltoken": batch["real_span_mask"].to(args.device),
-                "span_only_label": batch["span_only_label"].to(args.device),
-                "mode": "eval"
+                "subj_start_id": batch["subj_start_id"].to(args.device),
+                "obj_start_id": batch["obj_start_id"].to(args.device)
             }
 
-            loss, predict = model(**inputs)
-            eval_loss += loss.mean().item()
+            pretrained_model_outputs = pretrained_model(**inputs)
+            outputs = adapter_model(pretrained_model_outputs, **inputs)
 
+            tmp_eval_loss, logits = outputs[:2]
+            preds = logits.argmax(dim=1)
+            prediction += preds.tolist()
+            gold_result += inputs['label_ids'].tolist()
+            eval_loss += tmp_eval_loss.mean().item()
         nb_eval_steps += 1
         eval_pbar.set_description("Eval Loss - %.04f" % (eval_loss / nb_eval_steps))
+    # end loop, batch
 
-        if preds is None:
-            preds = np.array(predict)
-            out_label_ids = label_ids.numpy()
-        else:
-            preds = np.append(preds, np.array(predict), axis=0)
-            out_label_ids = np.append(out_label_ids, label_ids.numpy(), axis=0)
+    micro_F1 = f1_score(y_true=gold_result, y_pred=prediction, average='micro')
+    macro_F1 = f1_score(y_true=gold_result, y_pred=prediction, average='macro')
+    # auc_score = klue_re_auprc(probs=logits.detach().cpu(), labels=inputs["label_ids"].detach().cpu())
 
-    logger.info("  Eval End !")
-    eval_pbar.close()
+    logger.info("The micro_f1 on dev dataset: %f", micro_F1)
+    logger.info("The macro_f1 on dev dataset: %f", macro_F1)
+    # logger.info("The AUC on dev dataset: %f", auc_score)
 
-    eval_loss = eval_loss / nb_eval_steps
-    results = {
-        "loss": eval_loss
-    }
+    results['micro_F1'] = micro_F1
+    results['macro_F1'] = macro_F1
+    results['loss'] = eval_loss
 
-    labels = ETRI_TAG.keys()
-    label_map = {i: label for i, label in enumerate(labels)}
-
-    out_label_list = [[] for _ in range(out_label_ids.shape[0])]
-    preds_list = [[] for _ in range(out_label_ids.shape[0])]
-
-    ignore_index = torch.nn.CrossEntropyLoss().ignore_index
-    for i in range(out_label_ids.shape[0]):
-        for j in range(out_label_ids.shape[1]):
-            if out_label_ids[i, j] != ignore_index:
-                out_label_list[i].append(label_map[out_label_ids[i][j]])
-                preds_list[i].append(preds[i][j])
-    result = f1_pre_rec(out_label_list, preds_list, is_ner=True)
-    results.update(result)
-
-    output_dir = os.path.join(args.output_dir, mode)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    output_eval_file = os.path.join(output_dir,
-                                    "{}-{}.txt".format(mode, global_step) if global_step else "{}.txt".format(mode))
-    with open(output_eval_file, "w") as f_w:
-        logger.info("***** Eval results on {} dataset *****".format(mode))
+    output_eval_file = os.path.join(args.output_dir, args.ckpt_dir + "_eval_results.txt")
+    with open(output_eval_file, "w") as writer:
+        logger.info("***** Eval results  *****")
         for key in sorted(results.keys()):
-            logger.info("  {} = {}".format(key, str(results[key])))
-            f_w.write("  {} = {}\n".format(key, str(results[key])))
-        logger.info("\n" + show_ner_report(out_label_list, preds_list))  # Show report for each tag result
-        f_w.write("\n" + show_ner_report(out_label_list, preds_list))
+            # logger.info("  %s = %s", key, str(results[key]))
+            writer.write("%s = %s\n" % (key, str(results[key])))
 
     return results
 
@@ -172,6 +157,8 @@ def train(args, model, train_dataset, dev_dataset):
                 "attention_mask": batch["attention_mask"].to(args.device),
                 "token_type_ids": batch["token_type_ids"].to(args.device),
                 "label_ids": batch["label_ids"].to(args.device),
+                "subj_start_id": batch["subj_start_id"].to(args.device),
+                "obj_start_id": batch["obj_start_id"].to(args.device)
             }
 
             pretrained_model_outputs = pretrained_model(**inputs)
@@ -188,7 +175,7 @@ def train(args, model, train_dataset, dev_dataset):
                     (len(train_dataloader) <= args.gradient_accumulation_steps and \
                      (step + 1) == len(train_dataloader)
                     ):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(adapter_model.parameters(), args.max_grad_norm)
 
                 optimizer.step()
                 scheduler.step()
@@ -247,7 +234,7 @@ def main():
         args = AttrDict(json.load(config_file))
     args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    plm_tokenizer = ElectraTokenizer.from_pretrained("./utils/tokenizer")
+    plm_tokenizer = ElectraTokenizer.from_pretrained("token_utils/tokenizer")
     plm_model = PretrainedModel(plm_tokenizer)
 
     with open("./corpus/klue_re/relation_list.json", "r", encoding="utf-8") as f:
@@ -270,16 +257,18 @@ def main():
 
     # Load npy
     adapter_dataset_path = "./corpus/npy/klue_re/"
-    train_input_ids, train_attn_mask, train_tok_type_ids, train_label_ids = \
-        load_adapter_npy_datasets(src_path=adapter_dataset_path, mode="train")
-    dev_input_ids, dev_attn_mask, dev_tok_type_ids, dev_label_ids = \
-        load_adapter_npy_datasets(src_path=adapter_dataset_path, mode="dev")
+    train_input_ids, train_attn_mask, train_tok_type_ids, train_label_ids, train_subj_start_id, train_obj_start_id = \
+        load_rc_adapter_npy_datasets(src_path=adapter_dataset_path, mode="train")
+    dev_input_ids, dev_attn_mask, dev_tok_type_ids, dev_label_ids, dev_subj_start_id, dev_obj_start_id = \
+        load_rc_adapter_npy_datasets(src_path=adapter_dataset_path, mode="dev")
 
     # Make Datasets
-    train_dataset = AdapterDatasets(input_ids=train_input_ids, label_ids=train_label_ids,
-                                    attn_mask=train_attn_mask, tok_type_ids=train_tok_type_ids)
-    dev_dataset = AdapterDatasets(input_ids=dev_input_ids, label_ids=dev_label_ids,
-                                  attn_mask=dev_attn_mask, tok_type_ids=dev_tok_type_ids)
+    train_dataset = RcAdapterDatasets(input_ids=train_input_ids, label_ids=train_label_ids,
+                                      attn_mask=train_attn_mask, tok_type_ids=train_tok_type_ids,
+                                      subj_start_id=train_subj_start_id, obj_start_id=train_obj_start_id)
+    dev_dataset = RcAdapterDatasets(input_ids=dev_input_ids, label_ids=dev_label_ids,
+                                    attn_mask=dev_attn_mask, tok_type_ids=dev_tok_type_ids,
+                                    subj_start_id=dev_subj_start_id, obj_start_id=dev_obj_start_id)
 
     # Train
     if args.do_train:
@@ -301,9 +290,20 @@ def main():
 
         for checkpoint in checkpoints:
             global_step = checkpoint.split("-")[-1]
-            model = SpanNER.from_pretrained(checkpoint)
-            model.to(args.device)
-            result = evaluate(args, model, test_dataset, mode="test", global_step=global_step)
+            plm_tokenizer = ElectraTokenizer.from_pretrained("token_utils/tokenizer")
+            plm_model = PretrainedModel(plm_tokenizer)
+            plm_model.to(args.device)
+
+            adapter_model = AdapterModel(args, plm_model.config, num_labels=len(label_map.keys()))
+            if hasattr(adapter_model, "module"):
+                adapter_model.module.load_state_dict(torch.load(""))
+            else:
+                adapter_model.load_state_dict(torch.load(""))
+            adapter_model.to(args.device)
+
+            model = (plm_model, adapter_model)
+
+            result = evaluate(args, model, dev_dataset, mode="test", global_step=global_step)
             result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
             results.update(result)
 

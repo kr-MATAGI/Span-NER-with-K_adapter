@@ -47,17 +47,20 @@ class SpanNERDataset(Dataset):
         return items
 
 #===============================================================
-class AdapterDatasets(Dataset):
+class RcAdapterDatasets(Dataset):
 #===============================================================
     def __init__(
             self,
             input_ids: np.ndarray, label_ids: np.ndarray,
-            attn_mask: np.ndarray, tok_type_ids: np.ndarray
+            attn_mask: np.ndarray, tok_type_ids: np.ndarray,
+            subj_start_id: np.ndarray, obj_start_id: np.ndarray
     ):
         self.input_ids = torch.LongTensor(input_ids)
         self.attn_mask = torch.LongTensor(attn_mask)
         self.tok_type_ids = torch.LongTensor(tok_type_ids)
         self.label_ids = torch.LongTensor(label_ids)
+        self.subj_start_id = torch.FloatTensor(subj_start_id)
+        self.obj_start_id = torch.FloatTensor(obj_start_id)
 
     def __len__(self):
         return len(self.input_ids)
@@ -67,7 +70,43 @@ class AdapterDatasets(Dataset):
             "input_ids": self.input_ids[idx],
             "attention_mask": self.attn_mask[idx],
             "token_type_ids": self.tok_type_ids[idx],
-            "label_ids": self.label_ids[idx]
+            "label_ids": self.label_ids[idx],
+            "subj_start_id": self.subj_start_id[idx],
+            "obj_start_id": self.obj_start_id[idx]
         }
 
         return items
+
+#===============================================================
+class DpAdapterDatasets(Dataset):
+#===============================================================
+    def __init__(self,
+                 input_ids: np.ndarray, attn_mask: np.ndarray,
+                 bpe_head_mask: np.ndarray, bpe_tail_mask: np.ndarray,
+                 dep_ids: np.ndarray, head_ids: np.ndarray, pos_ids: np.ndarray):
+
+        self.input_ids = torch.LongTensor(input_ids)
+        self.attn_mask = torch.LongTensor(attn_mask)
+        self.bpe_head_mask = torch.LongTensor(bpe_head_mask)
+        self.bpe_tail_mask = torch.LongTensor(bpe_tail_mask)
+        self.dep_ids = torch.LongTensor(dep_ids)
+        self.head_ids = torch.LongTensor(head_ids)
+        self.pos_ids = torch.LongTensor(pos_ids)
+
+        self.max_word_length = max(torch.sum(self.bpe_head_mask, dim=1)).item()
+
+    def __len__(self):
+        return len(self.input_ids)
+
+    def __getitem__(self, idx):
+        item = (
+            self.input_ids[idx],
+            self.attn_mask[idx],
+            self.bpe_head_mask[idx],
+            self.bpe_tail_mask[idx],
+            self.dep_ids[idx],
+            self.head_ids[idx],
+            self.pos_ids[idx]
+        )
+
+        return item

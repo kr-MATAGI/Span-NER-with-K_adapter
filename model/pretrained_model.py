@@ -15,7 +15,7 @@ class PretrainedModel(nn.Module):
             p.requires_grad = False
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None,
-                label_ids=None, subj_special_start_id=None, obj_special_start_id=None):
+                label_ids=None, subj_start_id=None, obj_start_id=None):
         outputs = self.model(input_ids,
                              attention_mask=attention_mask,
                              token_type_ids=token_type_ids)

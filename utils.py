@@ -11,7 +11,11 @@ from sklearn import metrics as sklearn_metrics
 # config, model
 from transformers import ElectraConfig, AutoConfig, AutoModelForTokenClassification, ElectraForTokenClassification
 from model.span_ner import SpanNER
-from model.adapter import AdapterConfig
+from model.rc_adapter import AdapterConfig
+
+import numpy as np
+import sklearn
+from typing import Any
 
 #===============================================================
 def print_parameters(args, logger):
@@ -75,7 +79,7 @@ def load_corpus_span_ner_npy(src_path: str, mode: str="train"):
     return input_token_attn_npy, label_ids, all_span_idx, all_span_len, real_span_mask, span_only_label, pos_ids
 
 #===============================================================
-def load_adapter_npy_datasets(src_path: str, mode: str="train"):
+def load_rc_adapter_npy_datasets(src_path: str, mode: str = "train"):
 #===============================================================
     root_path = "/".join(src_path.split("/")[:-1]) + "/" + mode
 
@@ -83,11 +87,36 @@ def load_adapter_npy_datasets(src_path: str, mode: str="train"):
     attn_mask_npy = np.load(root_path + "_attention_mask.npy")
     token_type_ids_npy = np.load(root_path + "_token_type_ids.npy")
     label_ids_npy = np.load(root_path + "_label_ids.npy")
+    subj_start_id = np.load(root_path + "_subj_start_id.npy")
+    obj_start_id = np.load(root_path + "_obj_start_id.npy")
     print(f"[load_adapter_npy_datasets] mode: {mode}, root_path: {root_path}")
     print(f"input_ids.shape: {input_ids_npy.shape}, label_ids.shape: {label_ids_npy.shape}")
     print(f"attn_mask.shape: {attn_mask_npy.shape}, token_type_ids.shape: {token_type_ids_npy.shape}")
+    print(f"subj_start_id.shape: {subj_start_id.shape}, obj_start_id.shape: {obj_start_id.shape}")
 
-    return input_ids_npy, attn_mask_npy, token_type_ids_npy, label_ids_npy
+    return input_ids_npy, attn_mask_npy, token_type_ids_npy, label_ids_npy, subj_start_id, obj_start_id
+
+#===============================================================
+def load_dp_adapter_npy_datasets(src_path: str, mode: str = "train"):
+#===============================================================
+    root_path = "/".join(src_path.split("/")[:-1]) + "/" + mode
+
+    input_ids_npy = np.load(root_path + "_input_ids.npy")
+    attn_mask_npy = np.load(root_path + "_attention_mask.npy")
+
+    bpe_head_mask = np.load(root_path + "_bpe_head_mask.npy")
+    bpe_tail_mask = np.load(root_path + "_bpe_tail_mask.npy")
+
+    head_ids = np.load(root_path + "_head_ids.npy")
+    dep_ids = np.load(root_path + "_dep_ids.npy")
+    pos_ids = np.load(root_path + "_pos_ids.npy")
+
+    print(f"[load_adapter_npy_datasets] mode: {mode}, root_path: {root_path}")
+    print(f"input_ids.shape: {input_ids_npy.shape}, attn_mask_npy.shape: {attn_mask_npy.shape}")
+    print(f"bpe_head_mask.shape: {bpe_head_mask.shape}, bpe_tail_mask.shape: {bpe_tail_mask.shape}")
+    print(f"head_ids.shape: {head_ids.shape}, dep_ids.shape: {dep_ids.shape}, pos_ids.shape: {pos_ids.shape}")
+
+    return input_ids_npy, attn_mask_npy, bpe_head_mask, bpe_tail_mask, head_ids, dep_ids, pos_ids
 
 #===============================================================
 def load_adapter_config(args, plm_config):
@@ -156,3 +185,21 @@ def load_ner_config_and_model(args, tag_dict):
     model = SpanNER.from_pretrained(args.model_name_or_path, config=config)
 
     return config, model
+
+#===========================================================================
+def klue_re_auprc(probs: np.ndarray, labels: np.ndarray) -> Any:
+#===========================================================================
+    labels = np.eye(30)[labels]
+
+    print(probs.shape)
+    print(labels.shape)
+    print(probs)
+    print(labels)
+
+    score = np.zeros((30,))
+    for c in range(30):
+        targets_c = labels.take([c], axis=1).ravel()
+        preds_c = probs.take([c], axis=1).ravel()
+        precision, recall, _ = sklearn.metrics.precision_recall_curve(targets_c, preds_c)
+        score[c] = sklearn.metrics.auc(recall, precision)
+    return np.average(score) * 100.0
